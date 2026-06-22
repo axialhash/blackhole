@@ -7,386 +7,265 @@
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { background: #000; overflow: hidden; touch-action: none; }
-  canvas { display: block; }
+  canvas { display: block; position: fixed; top: 0; left: 0; }
   #ui {
     position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
-    display: flex; gap: 10px; z-index: 10;
+    display: flex; gap: 8px; z-index: 10;
   }
   .btn {
     font-family: 'Courier New', monospace; font-size: 11px;
-    background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);
-    color: rgba(255,255,255,0.4); padding: 8px 16px; border-radius: 6px;
-    cursor: pointer; transition: all 0.2s; letter-spacing: 0.08em;
+    background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1);
+    color: rgba(255,255,255,0.3); padding: 8px 14px; border-radius: 4px;
+    cursor: pointer; transition: all 0.15s; letter-spacing: 0.06em;
     -webkit-tap-highlight-color: transparent;
   }
-  .btn:hover, .btn.active {
-    border-color: rgba(255,255,255,0.3); color: rgba(255,255,255,0.7);
-    background: rgba(255,255,255,0.1);
-  }
-  #label {
-    position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
-    font-family: 'Courier New', monospace; font-size: 10px;
-    color: rgba(255,255,255,0.15); letter-spacing: 0.15em;
-    pointer-events: none; user-select: none;
-  }
+  .btn:active { background: rgba(255,255,255,0.1); }
+  .btn.on { border-color: rgba(255,255,255,0.25); color: rgba(255,255,255,0.6); }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="label">BLACK HOLE SIMULATION</div>
 <div id="ui">
-  <button class="btn active" data-shape="galaxy">GALAXY</button>
-  <button class="btn" data-shape="AX">AX</button>
-  <button class="btn" data-shape="harar">HARAR</button>
-  <button class="btn" data-shape="reset">RESET</button>
+  <button class="btn on" data-s="orbit">ORBIT</button>
+  <button class="btn" data-s="ax">AX</button>
+  <button class="btn" data-s="harar">HARAR</button>
+  <button class="btn" data-s="reset">RESET</button>
 </div>
 
 <script>
-// ─── CONFIG ───
-const PARTICLE_COUNT = 4000;
-const BH_MASS = 5000;
-const G = 0.5;               // gravitational constant
-const ORBIT_DAMPING = 0.9995; // very slight drag to prevent escape
-const TRAIL_LENGTH = 8;
-const BH_RADIUS = 8;
+const C = document.getElementById('c');
+const X = C.getContext('2d');
+let W, H, mobile;
+const isMobile = () => innerWidth < 768;
 
-// ─── CANVAS ───
-const canvas = document.getElementById('c');
-const ctx = canvas.getContext('2d');
-let W, H;
+// ── tunables ──
+const COUNT = [3000, 1200]; // [desktop, mobile]
+const G = 0.4;
+const BH_MASS = 4000;
+const DAMP = 0.9997;
+const BH_R = 6;
+let N, p, bh, shape, shapeT, shapeOn, tgt, frame;
 
 function resize() {
-  W = canvas.width = window.innerWidth;
-  H = canvas.height = window.innerHeight;
+  W = C.width = innerWidth;
+  H = C.height = innerHeight;
+  mobile = isMobile();
+  N = COUNT[+mobile];
 }
-resize();
-window.addEventListener('resize', () => {
+
+// ── particle ──
+function makeP(angle, dist) {
+  if (angle === undefined) {
+    angle = Math.random() * 6.2832;
+    dist = 120 + Math.random() * Math.min(W, H) * 0.4;
+  }
+  const spd = Math.sqrt(G * BH_MASS / dist) * (0.75 + Math.random() * 0.5);
+  return [
+    bh[0] + Math.cos(angle) * dist,  // x
+    bh[1] + Math.sin(angle) * dist,  // y
+    Math.cos(angle + 1.5708) * spd,  // vx
+    Math.sin(angle + 1.5708) * spd,  // vy
+    0.6 + Math.random() * 1.4,       // mass
+    0.4 + Math.random() * 0.6,       // alpha (precomputed)
+    -1,                               // target idx
+  ];
+}
+
+function init() {
   resize();
-  if (currentShape !== 'galaxy') generateShapeTargets(currentShape);
-});
-
-// ─── STATE ───
-let particles = [];
-let bh = { x: 0, y: 0, vx: 0, vy: 0 };
-let currentShape = 'galaxy';
-let shapePhase = false;
-let shapeTimer = 0;
-let shapeTargets = [];
-let frameCount = 0;
-
-// ─── PARTICLE ───
-function createParticle(scattered) {
-  if (scattered) {
-    // spread across the screen
-    return {
-      x: Math.random() * W,
-      y: Math.random() * H,
-      vx: (Math.random() - 0.5) * 0.5,
-      vy: (Math.random() - 0.5) * 0.5,
-      mass: 0.5 + Math.random() * 1.5,
-      hue: Math.random() * 360,
-      brightness: 60 + Math.random() * 40,
-      size: 0.8 + Math.random() * 2,
-      trail: [],
-      targetIdx: -1,
-    };
-  }
-  // orbital
-  const angle = Math.random() * Math.PI * 2;
-  const dist = 150 + Math.random() * Math.min(W, H) * 0.35;
-  const speed = Math.sqrt(G * BH_MASS / dist) * (0.7 + Math.random() * 0.6);
-  return {
-    x: bh.x + Math.cos(angle) * dist,
-    y: bh.y + Math.sin(angle) * dist,
-    vx: Math.cos(angle + Math.PI / 2) * speed,
-    vy: Math.sin(angle + Math.PI / 2) * speed,
-    mass: 0.5 + Math.random() * 1.5,
-    hue: (angle / (Math.PI * 2) * 360 + Math.random() * 40) % 360,
-    brightness: 60 + Math.random() * 40,
-    size: 0.8 + Math.random() * 2,
-    trail: [],
-    targetIdx: -1,
-  };
+  bh = [W / 2, H / 2];
+  shape = 'orbit';
+  shapeOn = false;
+  shapeT = 0;
+  tgt = [];
+  frame = 0;
+  p = [];
+  for (let i = 0; i < N; i++) p.push(makeP());
 }
 
-function initParticles(mode) {
-  particles = [];
-  bh.x = W / 2;
-  bh.y = H / 2;
-  shapePhase = false;
-  shapeTimer = 0;
-
-  for (let i = 0; i < PARTICLE_COUNT; i++) {
-    particles.push(createParticle(mode === 'scattered'));
+// ── text targets ──
+function textPts(text) {
+  const cv = document.createElement('canvas');
+  const cx = cv.getContext('2d');
+  const s = Math.min(W, H) / 500;
+  const fs = Math.floor(160 * s);
+  cv.width = W; cv.height = H;
+  cx.fillStyle = '#fff';
+  cx.font = `900 ${fs}px "Courier New",monospace`;
+  cx.textAlign = 'center';
+  cx.textBaseline = 'middle';
+  cx.fillText(text, W / 2, H / 2);
+  const d = cx.getImageData(0, 0, W, H).data;
+  const pts = [];
+  const step = mobile ? 6 : 4;
+  for (let y = 0; y < H; y += step)
+    for (let x = 0; x < W; x += step)
+      if (d[(y * W + x) * 4 + 3] > 128) pts.push(x, y);
+  // shuffle pairs
+  for (let i = pts.length - 2; i > 0; i -= 2) {
+    const j = (Math.random() * (i / 2 + 1) | 0) * 2;
+    [pts[i], pts[j]] = [pts[j], pts[i]];
+    [pts[i+1], pts[j+1]] = [pts[j+1], pts[i+1]];
   }
+  return pts;
 }
 
-// ─── TEXT/SHAPE TARGETS ───
-function getTextTargets(text) {
-  const offCanvas = document.createElement('canvas');
-  const offCtx = offCanvas.getContext('2d');
-  const scale = Math.min(W, H) / 600;
-  const fontSize = Math.floor(180 * scale);
-  offCanvas.width = W;
-  offCanvas.height = H;
+// ── physics ──
+function step() {
+  shapeT++;
+  const bhx = bh[0], bhy = bh[1];
 
-  offCtx.fillStyle = '#fff';
-  offCtx.font = `900 ${fontSize}px "Courier New", monospace`;
-  offCtx.textAlign = 'center';
-  offCtx.textBaseline = 'middle';
-  offCtx.fillText(text, W / 2, H / 2);
-
-  const imageData = offCtx.getImageData(0, 0, W, H);
-  const points = [];
-  const step = 4;
-
-  for (let y = 0; y < H; y += step) {
-    for (let x = 0; x < W; x += step) {
-      const i = (y * W + x) * 4;
-      if (imageData.data[i + 3] > 128) {
-        points.push({ x, y });
-      }
-    }
-  }
-
-  // shuffle and pick PARTICLE_COUNT targets
-  for (let i = points.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [points[i], points[j]] = [points[j], points[i]];
-  }
-
-  return points.slice(0, PARTICLE_COUNT);
-}
-
-function generateShapeTargets(shape) {
-  if (shape === 'galaxy') {
-    shapeTargets = [];
-    shapePhase = false;
-    return;
-  }
-  shapeTargets = getTextTargets(shape);
-}
-
-// ─── SIMULATION ───
-function update() {
-  frameCount++;
-  shapeTimer++;
-
-  // transition to shape phase after 4 seconds
-  if (!shapePhase && currentShape !== 'galaxy' && shapeTargets.length > 0 && shapeTimer > 240) {
-    shapePhase = true;
-    // assign each particle to nearest target
-    const assigned = new Set();
-    for (let i = 0; i < particles.length; i++) {
-      let bestDist = Infinity;
-      let bestIdx = -1;
-      for (let j = 0; j < shapeTargets.length; j++) {
-        if (assigned.has(j)) continue;
-        const dx = particles[i].x - shapeTargets[j].x;
-        const dy = particles[i].y - shapeTargets[j].y;
+  // activate shape phase
+  if (!shapeOn && shape !== 'orbit' && tgt.length && shapeT > 180) {
+    shapeOn = true;
+    // assign nearest targets
+    const used = new Uint8Array(tgt.length / 2);
+    for (let i = 0; i < N; i++) {
+      let bd = 1e18, bi = -1;
+      const px = p[i][0], py = p[i][1];
+      for (let j = 0; j < tgt.length; j += 2) {
+        if (used[j >> 1]) continue;
+        const dx = px - tgt[j], dy = py - tgt[j+1];
         const d = dx * dx + dy * dy;
-        if (d < bestDist) {
-          bestDist = d;
-          bestIdx = j;
-        }
+        if (d < bd) { bd = d; bi = j; }
       }
-      if (bestIdx >= 0) {
-        particles[i].targetIdx = bestIdx;
-        assigned.add(bestIdx);
-      }
+      if (bi >= 0) { p[i][6] = bi >> 1; used[bi >> 1] = 1; }
     }
   }
 
-  for (let i = 0; i < particles.length; i++) {
-    const p = particles[i];
+  for (let i = 0; i < N; i++) {
+    const q = p[i];
+    const dx = bhx - q[0], dy = bhy - q[1];
+    const d2 = dx * dx + dy * dy;
+    const d = Math.sqrt(d2);
 
-    // gravity toward black hole
-    const dx = bh.x - p.x;
-    const dy = bh.y - p.y;
-    const distSq = dx * dx + dy * dy;
-    const dist = Math.sqrt(distSq);
-
-    if (dist > BH_RADIUS) {
-      const force = (G * BH_MASS * p.mass) / distSq;
-      const ax = (dx / dist) * force / p.mass;
-      const ay = (dy / dist) * force / p.mass;
-      p.vx += ax;
-      p.vy += ay;
+    // gravity
+    if (d > BH_R) {
+      const f = G * BH_MASS / d2;
+      q[2] += (dx / d) * f;
+      q[3] += (dy / d) * f;
     }
 
-    // shape attraction
-    if (shapePhase && p.targetIdx >= 0 && shapeTargets[p.targetIdx]) {
-      const target = shapeTargets[p.targetIdx];
-      const tdx = target.x - p.x;
-      const tdy = target.y - p.y;
-      const td = Math.sqrt(tdx * tdx + tdy * tdy);
-      if (td > 1) {
-        // spring force toward target
-        const spring = 0.03;
-        const damp = 0.92;
-        p.vx += tdx * spring;
-        p.vy += tdy * spring;
-        p.vx *= damp;
-        p.vy *= damp;
-      }
+    // shape spring
+    if (shapeOn && q[6] >= 0) {
+      const ti = q[6] * 2;
+      const tx = tgt[ti], ty = tgt[ti + 1];
+      const sdx = tx - q[0], sdy = ty - q[1];
+      q[2] += sdx * 0.025;
+      q[3] += sdy * 0.025;
+      q[2] *= 0.93;
+      q[3] *= 0.93;
     }
 
-    // orbital damping
-    p.vx *= ORBIT_DAMPING;
-    p.vy *= ORBIT_DAMPING;
+    // damp
+    q[2] *= DAMP;
+    q[3] *= DAMP;
 
-    // speed limit
-    const speed = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
-    if (speed > 15) {
-      p.vx = (p.vx / speed) * 15;
-      p.vy = (p.vy / speed) * 15;
-    }
+    // speed cap
+    const spd = q[2] * q[2] + q[3] * q[3];
+    if (spd > 144) { const s = 12 / Math.sqrt(spd); q[2] *= s; q[3] *= s; }
 
-    // update position
-    p.x += p.vx;
-    p.y += p.vy;
+    // move
+    q[0] += q[2];
+    q[1] += q[3];
 
-    // trail
-    p.trail.push({ x: p.x, y: p.y });
-    if (p.trail.length > TRAIL_LENGTH) p.trail.shift();
-
-    // respawn if out of bounds
-    if (p.x < -50 || p.x > W + 50 || p.y < -50 || p.y > H + 50) {
-      const angle = Math.random() * Math.PI * 2;
-      const dist = 100 + Math.random() * 200;
-      p.x = bh.x + Math.cos(angle) * dist;
-      p.y = bh.y + Math.sin(angle) * dist;
-      const speed = Math.sqrt(G * BH_MASS / dist) * 0.8;
-      p.vx = Math.cos(angle + Math.PI / 2) * speed;
-      p.vy = Math.sin(angle + Math.PI / 2) * speed;
-      p.trail = [];
-      p.targetIdx = -1;
-    }
-
-    // hue shift
-    if (!shapePhase) {
-      p.hue = (p.hue + 0.1) % 360;
+    // respawn if off-screen
+    if (q[0] < -30 || q[0] > W + 30 || q[1] < -30 || q[1] > H + 30) {
+      const a = Math.random() * 6.2832;
+      const d = 80 + Math.random() * 180;
+      q[0] = bhx + Math.cos(a) * d;
+      q[1] = bhy + Math.sin(a) * d;
+      const sp = Math.sqrt(G * BH_MASS / d) * 0.8;
+      q[2] = Math.cos(a + 1.5708) * sp;
+      q[3] = Math.sin(a + 1.5708) * sp;
+      q[6] = -1;
     }
   }
 }
 
-// ─── RENDER ───
-function render() {
-  // fade trail
-  ctx.globalCompositeOperation = 'destination-out';
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
-  ctx.fillRect(0, 0, W, H);
-  ctx.globalCompositeOperation = 'source-over';
+// ── render ──
+function draw() {
+  // fade
+  X.globalCompositeOperation = 'destination-out';
+  X.fillStyle = 'rgba(0,0,0,0.12)';
+  X.fillRect(0, 0, W, H);
+  X.globalCompositeOperation = 'source-over';
 
-  // accretion disk glow
-  const gradient = ctx.createRadialGradient(bh.x, bh.y, BH_RADIUS, bh.x, bh.y, 120);
-  gradient.addColorStop(0, 'rgba(180, 100, 255, 0.15)');
-  gradient.addColorStop(0.3, 'rgba(100, 50, 200, 0.08)');
-  gradient.addColorStop(0.6, 'rgba(50, 20, 150, 0.03)');
-  gradient.addColorStop(1, 'transparent');
-  ctx.fillStyle = gradient;
-  ctx.fillRect(bh.x - 120, bh.y - 120, 240, 240);
+  // accretion glow
+  const r = 100 + Math.sin(frame * 0.02) * 20;
+  const g = X.createRadialGradient(bh[0], bh[1], BH_R, bh[0], bh[1], r);
+  g.addColorStop(0, 'rgba(160,160,180,0.1)');
+  g.addColorStop(0.5, 'rgba(100,100,120,0.03)');
+  g.addColorStop(1, 'transparent');
+  X.fillStyle = g;
+  X.fillRect(bh[0] - r, bh[1] - r, r * 2, r * 2);
 
-  // particles
-  for (let i = 0; i < particles.length; i++) {
-    const p = particles[i];
-
-    // trail
-    if (p.trail.length > 1) {
-      ctx.beginPath();
-      ctx.moveTo(p.trail[0].x, p.trail[0].y);
-      for (let j = 1; j < p.trail.length; j++) {
-        ctx.lineTo(p.trail[j].x, p.trail[j].y);
-      }
-      ctx.strokeStyle = `hsla(${p.hue}, 80%, ${p.brightness}%, 0.15)`;
-      ctx.lineWidth = p.size * 0.4;
-      ctx.stroke();
-    }
-
-    // particle
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-    const alpha = shapePhase ? 0.8 : 0.6;
-    ctx.fillStyle = `hsla(${p.hue}, 80%, ${p.brightness}%, ${alpha})`;
-    ctx.fill();
+  // particles — batch by size for fewer state changes
+  X.beginPath();
+  for (let i = 0; i < N; i++) {
+    const q = p[i];
+    X.moveTo(q[0] + q[4], q[1]);
+    X.arc(q[0], q[1], q[4], 0, 6.2832);
   }
+  X.fillStyle = 'rgba(200,210,255,0.55)';
+  X.fill();
 
-  // black hole core
-  ctx.beginPath();
-  ctx.arc(bh.x, bh.y, BH_RADIUS + 2, 0, Math.PI * 2);
-  ctx.fillStyle = '#000';
-  ctx.fill();
+  // black hole
+  X.beginPath();
+  X.arc(bh[0], bh[1], BH_R + 1, 0, 6.2832);
+  X.fillStyle = '#000';
+  X.fill();
 
-  // event horizon ring
-  ctx.beginPath();
-  ctx.arc(bh.x, bh.y, BH_RADIUS + 3, 0, Math.PI * 2);
-  ctx.strokeStyle = `rgba(140, 80, 255, ${0.3 + Math.sin(frameCount * 0.03) * 0.1})`;
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
+  // event horizon
+  X.beginPath();
+  X.arc(bh[0], bh[1], BH_R + 2, 0, 6.2832);
+  X.strokeStyle = `rgba(180,190,220,${0.25 + Math.sin(frame * 0.04) * 0.08})`;
+  X.lineWidth = 1;
+  X.stroke();
 }
 
-// ─── LOOP ───
+// ── loop ──
 function loop() {
-  update();
-  render();
+  step();
+  draw();
+  frame++;
   requestAnimationFrame(loop);
 }
 
-// ─── INPUT ───
-let dragging = false;
+// ── input ──
+let drag = false;
+const moveBH = (x, y) => { bh[0] = x; bh[1] = y; };
 
-canvas.addEventListener('mousedown', (e) => {
-  dragging = true;
-  bh.x = e.clientX;
-  bh.y = e.clientY;
-});
-canvas.addEventListener('mousemove', (e) => {
-  if (dragging) {
-    bh.x = e.clientX;
-    bh.y = e.clientY;
-  }
-});
-canvas.addEventListener('mouseup', () => { dragging = false; });
+C.addEventListener('mousedown', e => { drag = true; moveBH(e.clientX, e.clientY); });
+C.addEventListener('mousemove', e => { if (drag) moveBH(e.clientX, e.clientY); });
+C.addEventListener('mouseup', () => drag = false);
+C.addEventListener('touchstart', e => { drag = true; moveBH(e.touches[0].clientX, e.touches[0].clientY); e.preventDefault(); }, {passive:false});
+C.addEventListener('touchmove', e => { if (drag) moveBH(e.touches[0].clientX, e.touches[0].clientY); e.preventDefault(); }, {passive:false});
+C.addEventListener('touchend', () => drag = false);
 
-canvas.addEventListener('touchstart', (e) => {
-  dragging = true;
-  bh.x = e.touches[0].clientX;
-  bh.y = e.touches[0].clientY;
-  e.preventDefault();
-}, { passive: false });
-canvas.addEventListener('touchmove', (e) => {
-  if (dragging) {
-    bh.x = e.touches[0].clientX;
-    bh.y = e.touches[0].clientY;
-  }
-  e.preventDefault();
-}, { passive: false });
-canvas.addEventListener('touchend', () => { dragging = false; });
+window.addEventListener('resize', () => {
+  const oldN = N;
+  resize();
+  // adjust particle count on breakpoint change
+  while (p.length < N) p.push(makeP());
+  if (p.length > N) p.length = N;
+});
 
 // buttons
-document.querySelectorAll('.btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    const shape = btn.dataset.shape;
+document.querySelectorAll('.btn').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('.btn').forEach(x => x.classList.remove('on'));
+  b.classList.add('on');
+  const s = b.dataset.s;
+  if (s === 'reset') {
+    shape = 'orbit'; shapeOn = false; shapeT = 0; tgt = [];
+    init(); return;
+  }
+  shape = s; shapeOn = false; shapeT = 0;
+  tgt = textPts(s === 'ax' ? 'AX' : 'HARAR');
+}));
 
-    document.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-
-    if (shape === 'reset') {
-      currentShape = 'galaxy';
-      initParticles('orbital');
-      shapeTargets = [];
-      return;
-    }
-
-    currentShape = shape;
-    shapePhase = false;
-    shapeTimer = 0;
-    generateShapeTargets(shape);
-  });
-});
-
-// ─── INIT ───
-initParticles('orbital');
+// go
+init();
 loop();
 </script>
 </body>
